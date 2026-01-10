@@ -1,0 +1,62 @@
+{
+  "name": "@mrbelloc/encrypted-store",
+  "version": "0.2.2",
+  "description": "Client-side encrypted storage with change detection for small datasets in PWAs",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "build": "tsc --project tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "prepare": "husky"
+  },
+  "keywords": [
+    "encryption",
+    "storage",
+    "fireproof",
+    "pwa"
+  ],
+  "author": "Pablo de León Belloc <pablolb@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pablolb/encrypted-store.git"
+  },
+  "homepage": "https://github.com/pablolb/encrypted-store#readme",
+  "bugs": {
+    "url": "https://github.com/pablolb/encrypted-store/issues"
+  },
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@fireproof/partykit": "^0.19.118",
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.10.6",
+    "husky": "^9.1.7",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^30.2.0",
+    "lint-staged": "^16.2.7",
+    "partykit": "^0.0.115",
+    "partysocket": "^1.1.10",
+    "prettier": "^3.7.4",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "multiformats": "^13.4.2",
+    "use-fireproof": "^0.19.0"
+  },
+  "lint-staged": {
+    "src/**/*.ts": [
+      "prettier --write"
+    ]
+  }
+}
