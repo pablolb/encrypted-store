@@ -47,8 +47,9 @@ export interface FireproofDb {
     docs?: any[];
     rows: Array<{ key: string; doc?: any; value?: any }>;
   }>;
-  subscribe(callback: (changes: any[]) => void, remote?: boolean): void;
+  subscribe(callback: (changes: any[]) => void, remote?: boolean): () => void;
   del(id: string, rev?: string): Promise<any>;
+  changes(clock?: any): Promise<{ rows: any[]; clock: any }>;
 }
 
 /**
@@ -71,7 +72,9 @@ export class EncryptedStore {
   private knownIds: Set<string> = new Set(); // Set of known document IDs (stripped, e.g., "alice")
   private fullIdMap: Map<string, string> = new Map(); // stripped id -> full id with table
   private isSubscribed: boolean = false;
+  private unsubscribe: (() => void) | null = null; // Callback to unsubscribe from changes
   private connection: SyncConnection | null = null;
+  private clock: any = null; // High water mark for changes() API
 
   constructor(db: FireproofDb, password: string, listener: StoreListener) {
     this.db = db;
@@ -81,6 +84,9 @@ export class EncryptedStore {
 
   /** Load all documents and set up change detection (call once after creating store) */
   async loadAll(): Promise<void> {
+    // Reconnect subscription to ensure we receive all changes
+    this.reconnect();
+
     const { encryptedMap, fullIdMap } = await this.readAllEncrypted();
     this.fullIdMap = fullIdMap;
 
@@ -101,20 +107,21 @@ export class EncryptedStore {
       }
     }
 
+    // Initialize clock for changes() API
+    try {
+      const result = await this.db.changes();
+      this.clock = result.clock;
+      console.log("[EncryptedStore] Initialized changes clock");
+    } catch (error) {
+      console.warn(
+        "[EncryptedStore] db.changes() not available, falling back to subscription only",
+      );
+    }
+
     // Fire initial docsAdded for everything, grouped by table
     if (docs.length > 0) {
       const events = this.groupByTable(docs, fullIdMap);
       this.listener.docsAdded(events);
-    }
-
-    // Set up subscribe (only once)
-    if (!this.isSubscribed) {
-      this.db.subscribe((changes) => {
-        this.handleChange(changes).catch((err) => {
-          console.error("EncryptedStore: Error handling change:", err);
-        });
-      }, true); // Include remote changes
-      this.isSubscribed = true;
     }
   }
 
@@ -204,6 +211,31 @@ export class EncryptedStore {
     this.connection = null;
   }
 
+  /** Reconnect subscription to ensure remote changes are received */
+  reconnect(): void {
+    // Cancel existing subscription if any
+    if (this.unsubscribe) {
+      console.log("[EncryptedStore] Canceling existing subscription");
+      this.unsubscribe();
+      this.unsubscribe = null;
+      this.isSubscribed = false;
+    }
+
+    // Re-subscribe to database changes
+    // We treat subscription as a "something changed" notification
+    // and always query db.changes() to get actual changes (external indexer pattern)
+    console.log("[EncryptedStore] Reconnecting subscription (remote=true)");
+    this.unsubscribe = this.db.subscribe(() => {
+      console.log(
+        "[EncryptedStore] Subscription notified - querying db.changes()",
+      );
+      this.handleChange().catch((err) => {
+        console.error("EncryptedStore: Error handling change:", err);
+      });
+    }, true); // Include remote changes
+    this.isSubscribed = true;
+  }
+
   /** Read all encrypted documents (without decrypting) */
   private async readAllEncrypted(): Promise<{
     encryptedMap: Map<string, string>;
@@ -231,67 +263,91 @@ export class EncryptedStore {
   }
 
   /**
-   * Process Fireproof changes: { _id, d? }
-   * With d = create/update, without d = deletion
+   * Query db.changes() and process any new changes (external indexer pattern)
+   * This is called whenever the subscription fires
    */
-  private async handleChange(changes: any[]): Promise<void> {
-    const newDocs: Doc[] = [];
-    const changedDocs: Doc[] = [];
-    const deletedDocs: Array<{ _id: string }> = [];
+  private async handleChange(): Promise<void> {
+    try {
+      // Query changes since last clock
+      const result = await this.db.changes(this.clock);
+      console.log(
+        `[EncryptedStore] db.changes() returned ${result.rows.length} changes`,
+      );
 
-    for (const change of changes) {
-      if (change.d) {
-        // Has encrypted data - it's a create or update
-        try {
-          const { type, id } = this.parseFullId(change._id);
+      if (result.rows.length === 0) {
+        return;
+      }
 
-          // Decrypt the document
-          const decrypted = await this.decryptFromEncryptedData(change.d, id);
+      // Update clock first
+      this.clock = result.clock;
 
-          // Check if it's new or changed
-          if (this.knownIds.has(id)) {
-            changedDocs.push(decrypted);
-          } else {
-            newDocs.push(decrypted);
-            this.knownIds.add(id);
-            this.fullIdMap.set(id, change._id); // Update fullIdMap for new docs
+      // Transform db.changes() format to processable format
+      // db.changes() returns { key, value: { _id, d }, clock }
+      const changes = result.rows.map((row) => row.value);
+
+      const newDocs: Doc[] = [];
+      const changedDocs: Doc[] = [];
+      const deletedDocs: Array<{ _id: string }> = [];
+
+      for (const change of changes) {
+        if (change.d) {
+          // Has encrypted data - it's a create or update
+          try {
+            const { type, id } = this.parseFullId(change._id);
+
+            // Decrypt the document
+            const decrypted = await this.decryptFromEncryptedData(change.d, id);
+
+            // Check if it's new or changed
+            if (this.knownIds.has(id)) {
+              changedDocs.push(decrypted);
+            } else {
+              newDocs.push(decrypted);
+              this.knownIds.add(id);
+              this.fullIdMap.set(id, change._id); // Update fullIdMap for new docs
+            }
+          } catch (error) {
+            // Skip documents we can't decrypt or parse
           }
-        } catch (error) {
-          // Skip documents we can't decrypt or parse
-        }
-      } else {
-        // No encrypted data - it's a deletion
-        try {
-          const { type, id } = this.parseFullId(change._id);
+        } else {
+          // No encrypted data - it's a deletion
+          try {
+            const { type, id } = this.parseFullId(change._id);
 
-          if (this.knownIds.has(id)) {
-            deletedDocs.push({ _id: id });
-            this.knownIds.delete(id);
-            // Keep fullIdMap entry for the deletion event, remove after
+            if (this.knownIds.has(id)) {
+              deletedDocs.push({ _id: id });
+              this.knownIds.delete(id);
+              // Keep fullIdMap entry for the deletion event, remove after
+            }
+          } catch (error) {
+            // Skip invalid IDs
           }
-        } catch (error) {
-          // Skip invalid IDs
         }
       }
-    }
 
-    // Fire events grouped by table
-    if (newDocs.length > 0) {
-      const events = this.groupByTable(newDocs, this.fullIdMap);
-      this.listener.docsAdded(events);
-    }
-    if (changedDocs.length > 0) {
-      const events = this.groupByTable(changedDocs, this.fullIdMap);
-      this.listener.docsChanged(events);
-    }
-    if (deletedDocs.length > 0) {
-      const events = this.groupDeletedByTable(deletedDocs);
-      this.listener.docsDeleted(events);
-
-      // Clean up fullIdMap entries for deleted docs
-      for (const doc of deletedDocs) {
-        this.fullIdMap.delete(doc._id);
+      // Fire events grouped by table
+      console.log(
+        `[EncryptedStore] Firing events: ${newDocs.length} new, ${changedDocs.length} changed, ${deletedDocs.length} deleted`,
+      );
+      if (newDocs.length > 0) {
+        const events = this.groupByTable(newDocs, this.fullIdMap);
+        this.listener.docsAdded(events);
       }
+      if (changedDocs.length > 0) {
+        const events = this.groupByTable(changedDocs, this.fullIdMap);
+        this.listener.docsChanged(events);
+      }
+      if (deletedDocs.length > 0) {
+        const events = this.groupDeletedByTable(deletedDocs);
+        this.listener.docsDeleted(events);
+
+        // Clean up fullIdMap entries for deleted docs
+        for (const doc of deletedDocs) {
+          this.fullIdMap.delete(doc._id);
+        }
+      }
+    } catch (error) {
+      console.error("[EncryptedStore] db.changes() failed:", error);
     }
   }
 
