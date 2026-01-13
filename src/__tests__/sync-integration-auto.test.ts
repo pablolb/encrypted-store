@@ -13,10 +13,9 @@ import { PartykitTestServer } from "./partykit-test-helper";
  */
 describe("Automated PartyKit Server Tests", () => {
   let partykitServer: PartykitTestServer;
-  const TEST_PORT = 1999;
 
   beforeAll(async () => {
-    partykitServer = new PartykitTestServer(TEST_PORT);
+    partykitServer = new PartykitTestServer();
     await partykitServer.start();
   }, 15000);
 
@@ -28,7 +27,8 @@ describe("Automated PartyKit Server Tests", () => {
 
   it("should start PartyKit server successfully", () => {
     expect(partykitServer).toBeDefined();
-    expect(partykitServer.getUrl()).toBe("http://localhost:1999");
+    const url = partykitServer.getUrl();
+    expect(url).toMatch(/^http:\/\/localhost:\d+$/);
   });
 
   it("should provide correct server URL", () => {

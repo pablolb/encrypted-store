@@ -41,6 +41,12 @@ const store = new EncryptedStore(db, "my-password", {
       console.log(`Deleted ${table}:`, docs);
     });
   },
+  decryptionError: (events) => {
+    events.forEach(({ docId, error, doc }) => {
+      console.error(`Failed to decrypt ${docId}:`, error.message);
+      console.log("Raw encrypted document:", doc);
+    });
+  },
 });
 
 // Load existing data
@@ -64,15 +70,22 @@ Creates an encrypted store.
 
 - `db`: Fireproof database instance
 - `password`: Encryption password (string)
-- `listener`: Object with three callbacks:
+- `listener`: Object with callbacks:
   - `docsAdded(events: TableEvent[])`: Fired when new documents are added
   - `docsChanged(events: TableEvent[])`: Fired when documents are updated
   - `docsDeleted(events: TableEvent[])`: Fired when documents are deleted
+  - `decryptionError?(events: DecryptionErrorEvent[])`: Optional. Fired when documents fail to decrypt
 
 Each `TableEvent` has:
 
 - `table`: Document type (e.g., "users", "transactions")
 - `docs`: Array of documents with that type
+
+Each `DecryptionErrorEvent` has:
+
+- `docId`: Full document ID that failed to decrypt (e.g., "users_alice")
+- `error`: Error object with details about why decryption failed
+- `doc`: The raw encrypted document from Fireproof (includes `_id` and `d` fields)
 
 ### `await store.loadAll()`
 
@@ -123,6 +136,58 @@ store.disconnectRemote();
 
 **Note:** Remote servers only see encrypted blobs - they cannot read your data.
 
+### Testing Remote Sync
+
+To test that remote sync is working:
+
+1. **Connect to a remote server** using one of the Fireproof connectors (PartyKit, Netlify, etc.)
+2. **Monitor decryption errors** - If data arrives from another client encrypted with a different password or corrupted, you'll receive `decryptionError` events
+3. **Use the decryptionError callback** to verify connectivity and detect synchronization issues
+
+```typescript
+const store = new EncryptedStore(db, "my-password", {
+  docsAdded: (events) => {
+    console.log("✓ Received new documents from remote");
+  },
+  docsChanged: (events) => {
+    console.log("✓ Received document updates from remote");
+  },
+  docsDeleted: (events) => {
+    console.log("✓ Received document deletions from remote");
+  },
+  decryptionError: (events) => {
+    // This fires when remote data can't be decrypted
+    // Useful for detecting sync issues or password mismatches
+    events.forEach(({ docId, error, doc }) => {
+      console.warn(`⚠ Failed to decrypt ${docId}:`, error.message);
+      console.log("Raw encrypted document available for debugging:", doc);
+    });
+  },
+});
+
+await store.connectRemote(connect, {
+  namespace: "my-app",
+  host: "http://localhost:1999",
+});
+```
+
+**Important:** Unlike traditional databases like CouchDB/PouchDB, Fireproof connectors don't provide connection status events. The subscription mechanism handles both local and remote changes automatically. Monitor the event callbacks to verify sync is working.
+
+## Decryption Error Handling
+
+The store automatically handles documents that fail to decrypt:
+
+- **Wrong password**: Documents encrypted with a different password will trigger `decryptionError` events
+- **Corrupted data**: Malformed or corrupted encrypted data is caught and reported
+- **Graceful degradation**: Successfully decrypted documents are still processed; failures don't stop the store
+- **Remote sync issues**: Detect when remote clients are using different passwords or sending corrupted data
+
+This is especially useful when:
+- Testing remote sync connectivity
+- Debugging encryption/decryption issues
+- Detecting data corruption
+- Monitoring multi-client scenarios with different encryption keys
+
 ## How It Works
 
 1. **Encryption**: Documents are encrypted with AES-256-GCM before storage
@@ -130,6 +195,7 @@ store.disconnectRemote();
 3. **Change Detection**: Fireproof's subscribe notifies us of changes
 4. **Diff Computation**: We track IDs and decrypt only changed documents
 5. **Events**: Your app gets organized events by table (added/changed/deleted)
+6. **Error Handling**: Failed decryptions are reported via optional callback
 
 ## Example: React Integration
 
@@ -177,6 +243,13 @@ function useEncryptedStore(dbName: string, password: string) {
           }
         });
       },
+      decryptionError: (events) => {
+        // Handle decryption errors (optional)
+        events.forEach(({ docId, error, doc }) => {
+          console.error(`Failed to decrypt ${docId}:`, error.message);
+          // Raw encrypted document is available in doc.d if needed
+        });
+      },
     });
 
     encryptedStore.loadAll();
@@ -195,10 +268,17 @@ interface TableEvent {
   docs: Doc[];
 }
 
+interface DecryptionErrorEvent {
+  docId: string;
+  error: Error;
+  doc: any; // The raw encrypted document from Fireproof
+}
+
 interface StoreListener {
   docsAdded: (events: TableEvent[]) => void;
   docsChanged: (events: TableEvent[]) => void;
   docsDeleted: (events: TableEvent[]) => void;
+  decryptionError?: (events: DecryptionErrorEvent[]) => void;
 }
 
 interface Doc {

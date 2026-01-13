@@ -9,6 +9,7 @@ export type {
   StoreListener,
   FireproofDb,
   TableEvent,
+  DecryptionErrorEvent,
   ConnectorFunction,
   RemoteConnectOptions,
   SyncConnection,
@@ -17,5 +18,5 @@ export type {
 export { EncryptionHelper, DecryptionError } from "./encryption.js";
 export type { CryptoInterface } from "./encryption.js";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 export { fireproof } from "use-fireproof";

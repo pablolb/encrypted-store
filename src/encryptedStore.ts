@@ -15,10 +15,17 @@ export interface TableEvent {
   docs: Doc[];
 }
 
+export interface DecryptionErrorEvent {
+  docId: string;
+  error: Error;
+  doc: any; // The raw encrypted document from Fireproof
+}
+
 export interface StoreListener {
   docsAdded: (events: TableEvent[]) => void;
   docsChanged: (events: TableEvent[]) => void;
   docsDeleted: (events: TableEvent[]) => void;
+  decryptionError?: (events: DecryptionErrorEvent[]) => void;
 }
 
 export interface RemoteConnectOptions {
@@ -95,6 +102,7 @@ export class EncryptedStore {
 
     // Decrypt all documents for initial docsAdded event
     const docs: Doc[] = [];
+    const decryptionErrors: DecryptionErrorEvent[] = [];
     for (const [id, encryptedData] of encryptedMap) {
       try {
         const decrypted = await this.decryptFromEncryptedData(
@@ -103,7 +111,13 @@ export class EncryptedStore {
         );
         docs.push(decrypted);
       } catch (error) {
-        // Skip documents we can't decrypt
+        // Track documents we can't decrypt
+        const fullId = fullIdMap.get(id);
+        decryptionErrors.push({
+          docId: fullId || id,
+          error: error instanceof Error ? error : new Error(String(error)),
+          doc: { _id: fullId || id, d: encryptedData },
+        });
       }
     }
 
@@ -122,6 +136,11 @@ export class EncryptedStore {
     if (docs.length > 0) {
       const events = this.groupByTable(docs, fullIdMap);
       this.listener.docsAdded(events);
+    }
+
+    // Fire decryptionError events if any
+    if (decryptionErrors.length > 0 && this.listener.decryptionError) {
+      this.listener.decryptionError(decryptionErrors);
     }
   }
 
@@ -288,6 +307,7 @@ export class EncryptedStore {
       const newDocs: Doc[] = [];
       const changedDocs: Doc[] = [];
       const deletedDocs: Array<{ _id: string }> = [];
+      const decryptionErrors: DecryptionErrorEvent[] = [];
 
       for (const change of changes) {
         if (change.d) {
@@ -307,7 +327,12 @@ export class EncryptedStore {
               this.fullIdMap.set(id, change._id); // Update fullIdMap for new docs
             }
           } catch (error) {
-            // Skip documents we can't decrypt or parse
+            // Track documents we can't decrypt
+            decryptionErrors.push({
+              docId: change._id,
+              error: error instanceof Error ? error : new Error(String(error)),
+              doc: change,
+            });
           }
         } else {
           // No encrypted data - it's a deletion
@@ -327,7 +352,7 @@ export class EncryptedStore {
 
       // Fire events grouped by table
       console.log(
-        `[EncryptedStore] Firing events: ${newDocs.length} new, ${changedDocs.length} changed, ${deletedDocs.length} deleted`,
+        `[EncryptedStore] Firing events: ${newDocs.length} new, ${changedDocs.length} changed, ${deletedDocs.length} deleted, ${decryptionErrors.length} decryption errors`,
       );
       if (newDocs.length > 0) {
         const events = this.groupByTable(newDocs, this.fullIdMap);
@@ -345,6 +370,9 @@ export class EncryptedStore {
         for (const doc of deletedDocs) {
           this.fullIdMap.delete(doc._id);
         }
+      }
+      if (decryptionErrors.length > 0 && this.listener.decryptionError) {
+        this.listener.decryptionError(decryptionErrors);
       }
     } catch (error) {
       console.error("[EncryptedStore] db.changes() failed:", error);

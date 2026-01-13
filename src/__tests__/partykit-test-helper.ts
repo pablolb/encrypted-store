@@ -1,14 +1,32 @@
 import { spawn, ChildProcess } from "child_process";
+import { createServer } from "net";
+
+// Get a free port from the OS
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, () => {
+      const address = server.address();
+      if (address && typeof address === "object") {
+        const port = address.port;
+        server.close(() => resolve(port));
+      } else {
+        reject(new Error("Failed to get port"));
+      }
+    });
+  });
+}
 
 export class PartykitTestServer {
   private process: ChildProcess | null = null;
-  private port: number;
-
-  constructor(port: number = 1999) {
-    this.port = port;
-  }
+  private port: number | null = null;
 
   async start(): Promise<void> {
+    // Get a free port from the OS
+    this.port = await getFreePort();
+
     return new Promise((resolve, reject) => {
       // Start PartyKit server
       this.process = spawn(
@@ -81,6 +99,16 @@ export class PartykitTestServer {
   }
 
   getUrl(): string {
+    if (!this.port) {
+      throw new Error("Server not started yet");
+    }
     return `http://localhost:${this.port}`;
+  }
+
+  getPort(): number {
+    if (!this.port) {
+      throw new Error("Server not started yet");
+    }
+    return this.port;
   }
 }

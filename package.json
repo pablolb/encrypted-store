@@ -1,6 +1,6 @@
 {
   "name": "@mrbelloc/encrypted-store",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Client-side encrypted storage with change detection for small datasets in PWAs",
   "type": "module",
   "main": "dist/index.js",
