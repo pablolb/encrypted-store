@@ -1,6 +1,6 @@
 {
   "name": "@mrbelloc/encrypted-store",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Encrypted document storage with change detection using PouchDB and AES-256-GCM",
   "type": "module",
   "main": "dist/index.js",
