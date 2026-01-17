@@ -1,7 +1,7 @@
 {
   "name": "@mrbelloc/encrypted-store",
-  "version": "0.3.0",
-  "description": "Client-side encrypted storage with change detection for small datasets in PWAs",
+  "version": "1.1.0",
+  "description": "Encrypted document storage with change detection using PouchDB and AES-256-GCM",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,8 +18,10 @@
   "keywords": [
     "encryption",
     "storage",
-    "fireproof",
-    "pwa"
+    "pouchdb",
+    "couchdb",
+    "offline-first",
+    "sync"
   ],
   "author": "Pablo de León Belloc <pablolb@gmail.com>",
   "license": "MIT",
@@ -37,22 +39,22 @@
     "README.md"
   ],
   "devDependencies": {
-    "@fireproof/partykit": "^0.19.118",
     "@types/jest": "^29.5.11",
     "@types/node": "^20.10.6",
+    "@types/pouchdb": "^6.4.2",
     "husky": "^9.1.7",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^30.2.0",
     "lint-staged": "^16.2.7",
-    "partykit": "^0.0.115",
-    "partysocket": "^1.1.10",
+    "pouchdb-adapter-memory": "^8.0.1",
     "prettier": "^3.7.4",
     "ts-jest": "^29.1.1",
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "multiformats": "^13.4.2",
-    "use-fireproof": "^0.19.0"
+    "pouchdb": "^8.0.1",
+    "pouchdb-adapter-http": "^8.0.1",
+    "pouchdb-adapter-idb": "^8.0.1"
   },
   "lint-staged": {
     "src/**/*.ts": [

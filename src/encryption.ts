@@ -1,6 +1,7 @@
 /**
- * Interface defining the subset of the Web Crypto API that we use
+ * AES-256-GCM encryption using WebCrypto API
  */
+
 interface CryptoInterface {
   subtle: {
     digest(algorithm: string, data: BufferSource): Promise<ArrayBuffer>;
@@ -38,11 +39,6 @@ class EncryptionHelper {
   private readonly passphrase: string;
   private readonly crypto: CryptoInterface;
 
-  /**
-   * @param passphrase - The passphrase used for encryption/decryption
-   * @param crypto - Optional crypto implementation. If not provided, uses the global crypto object.
-   *                 This parameter is primarily for testing purposes.
-   */
   constructor(passphrase: string, crypto?: CryptoInterface) {
     this.passphrase = passphrase;
     this.crypto =

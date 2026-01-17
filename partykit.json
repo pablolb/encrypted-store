@@ -1,7 +1,0 @@
-{
-  "name": "encrypted-store-test",
-  "main": "src/__tests__/partykit-server.ts",
-  "parties": {
-    "fireproof": "node_modules/@fireproof/partykit/server.ts"
-  }
-}

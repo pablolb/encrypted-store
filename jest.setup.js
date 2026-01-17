@@ -1,29 +1,19 @@
-import { TextEncoder, TextDecoder } from 'util';
-import { TransformStream, ReadableStream, WritableStream } from 'stream/web';
-import { webcrypto } from 'crypto';
+import { TextEncoder, TextDecoder } from "util";
+import { webcrypto } from "crypto";
 
 global.TextEncoder = TextEncoder;
 global.TextDecoder = TextDecoder;
-global.TransformStream = TransformStream;
-global.ReadableStream = ReadableStream;
-global.WritableStream = WritableStream;
 
-// Provide crypto with subtle for Fireproof
+// Provide crypto with subtle for encryption
 global.crypto = webcrypto;
 
-// Minimal browser globals for Fireproof
-global.window = global;
-global.document = {
-  createElement: () => ({}),
-  head: { appendChild: () => {} },
-};
-global.navigator = {
-  userAgent: 'node.js',
-};
-global.localStorage = {
-  getItem: () => null,
-  setItem: () => {},
-  removeItem: () => {},
-  clear: () => {},
-};
-global.indexedDB = undefined;
+// Mock crypto.randomUUID for tests
+if (!global.crypto.randomUUID) {
+  global.crypto.randomUUID = () => {
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  };
+}

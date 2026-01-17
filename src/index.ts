@@ -1,22 +1,24 @@
 /**
- * Encrypted storage with change detection for small datasets in PWAs
- * Built on Fireproof with AES-256-GCM encryption
+ * Encrypted storage with change detection using PouchDB
+ * Simple API with AES-256-GCM encryption
  * @packageDocumentation
  */
 
 export { EncryptedStore } from "./encryptedStore.js";
 export type {
+  Doc,
   StoreListener,
-  FireproofDb,
-  TableEvent,
   DecryptionErrorEvent,
-  ConnectorFunction,
-  RemoteConnectOptions,
-  SyncConnection,
-} from "./encryptedStore";
+  ConflictInfo,
+  SyncInfo,
+  RemoteOptions,
+} from "./encryptedStore.js";
 
 export { EncryptionHelper, DecryptionError } from "./encryption.js";
 export type { CryptoInterface } from "./encryption.js";
 
-export const VERSION = "0.3.0";
-export { fireproof } from "use-fireproof";
+export const VERSION = "1.1.0";
+
+// Re-export PouchDB for convenience
+import PouchDB from "pouchdb";
+export { PouchDB };

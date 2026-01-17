@@ -1,500 +1,518 @@
 /**
- * Encrypted storage with change detection for small datasets
- * Wraps Fireproof with AES-256-GCM encryption + real-time event system
+ * Encrypted storage with change detection using PouchDB
+ * Simple API: put, get, delete, loadAll
  */
 
 import { EncryptionHelper } from "./encryption.js";
+import type PouchDB from "pouchdb";
 
-interface Doc {
+export interface Doc {
   _id: string;
+  _table: string;
   [key: string]: any;
-}
-
-export interface TableEvent {
-  table: string;
-  docs: Doc[];
 }
 
 export interface DecryptionErrorEvent {
   docId: string;
   error: Error;
-  doc: any; // The raw encrypted document from Fireproof
+  rawDoc: any;
+}
+
+export interface ConflictInfo {
+  docId: string;
+  table: string;
+  id: string;
+  currentRev: string;
+  conflictRevs: string[];
+  winner: Doc;
+  losers: Doc[];
+}
+
+export interface SyncInfo {
+  direction: "push" | "pull" | "both";
+  change: {
+    docs_read?: number;
+    docs_written?: number;
+    doc_write_failures?: number;
+    errors?: any[];
+  };
 }
 
 export interface StoreListener {
-  docsAdded: (events: TableEvent[]) => void;
-  docsChanged: (events: TableEvent[]) => void;
-  docsDeleted: (events: TableEvent[]) => void;
-  decryptionError?: (events: DecryptionErrorEvent[]) => void;
+  onChange: (docs: Doc[]) => void;
+  onDelete: (docs: Doc[]) => void;
+  onConflict?: (conflicts: ConflictInfo[]) => void;
+  onSync?: (info: SyncInfo) => void;
+  onError?: (errors: DecryptionErrorEvent[]) => void;
 }
 
-export interface RemoteConnectOptions {
-  namespace: string;
-  host: string;
+export interface RemoteOptions {
+  url: string;
+  live?: boolean;
+  retry?: boolean;
 }
 
-export interface SyncConnection {
-  ready?: Promise<void>;
-  disconnect?: () => void;
-}
-
-export type ConnectorFunction = (
-  db: FireproofDb,
-  namespace: string,
-  host: string,
-) => SyncConnection;
-
-export interface FireproofDb {
-  put(doc: any): Promise<{ id: string; rev?: string }>;
-  get(id: string): Promise<any>;
-  query(
-    field: string,
-    options?: { limit?: number; descending?: boolean },
-  ): Promise<{
-    docs?: any[];
-    rows: Array<{ key: string; doc?: any; value?: any }>;
-  }>;
-  subscribe(callback: (changes: any[]) => void, remote?: boolean): () => void;
-  del(id: string, rev?: string): Promise<any>;
-  changes(clock?: any): Promise<{ rows: any[]; clock: any }>;
-}
-
-/**
- * Document with encrypted data field
- */
 interface EncryptedDoc {
   _id: string;
-  d: string; // encrypted data
+  _rev?: string;
+  d: string;
 }
 
-/**
- * EncryptedStore class
- *
- * Main entry point for encrypted storage with change detection
- */
 export class EncryptedStore {
-  private db: FireproofDb;
+  private db: PouchDB.Database;
   private encryptionHelper: EncryptionHelper;
   private listener: StoreListener;
-  private knownIds: Set<string> = new Set(); // Set of known document IDs (stripped, e.g., "alice")
-  private fullIdMap: Map<string, string> = new Map(); // stripped id -> full id with table
-  private isSubscribed: boolean = false;
-  private unsubscribe: (() => void) | null = null; // Callback to unsubscribe from changes
-  private connection: SyncConnection | null = null;
-  private clock: any = null; // High water mark for changes() API
+  private changesHandler: PouchDB.Core.Changes<any> | null = null;
+  private syncHandler: PouchDB.Replication.Sync<any> | null = null;
+  private processingChain: Promise<void> = Promise.resolve();
 
-  constructor(db: FireproofDb, password: string, listener: StoreListener) {
+  constructor(
+    db: PouchDB.Database,
+    password: string,
+    listener?: StoreListener,
+  ) {
     this.db = db;
     this.encryptionHelper = new EncryptionHelper(password);
-    this.listener = listener;
+    this.listener = listener || { onChange: () => {}, onDelete: () => {} };
   }
 
-  /** Load all documents and set up change detection (call once after creating store) */
+  /** Load all documents and set up change detection */
   async loadAll(): Promise<void> {
-    // Reconnect subscription to ensure we receive all changes
-    this.reconnect();
-
-    const { encryptedMap, fullIdMap } = await this.readAllEncrypted();
-    this.fullIdMap = fullIdMap;
-
-    // Build initial set of known IDs
-    this.knownIds = new Set(encryptedMap.keys());
-
-    // Decrypt all documents for initial docsAdded event
-    const docs: Doc[] = [];
-    const decryptionErrors: DecryptionErrorEvent[] = [];
-    for (const [id, encryptedData] of encryptedMap) {
-      try {
-        const decrypted = await this.decryptFromEncryptedData(
-          encryptedData,
-          id,
-        );
-        docs.push(decrypted);
-      } catch (error) {
-        // Track documents we can't decrypt
-        const fullId = fullIdMap.get(id);
-        decryptionErrors.push({
-          docId: fullId || id,
-          error: error instanceof Error ? error : new Error(String(error)),
-          doc: { _id: fullId || id, d: encryptedData },
-        });
-      }
-    }
-
-    // Initialize clock for changes() API
     try {
-      const result = await this.db.changes();
-      this.clock = result.clock;
-      console.log("[EncryptedStore] Initialized changes clock");
+      const result = await this.db.allDocs({
+        include_docs: true,
+        conflicts: true,
+      });
+
+      const docs: Doc[] = [];
+      const errors: DecryptionErrorEvent[] = [];
+      const conflicts: ConflictInfo[] = [];
+
+      for (const row of result.rows) {
+        if (!row.doc || row.id.startsWith("_design/")) continue;
+
+        const encryptedDoc = row.doc as EncryptedDoc & {
+          _conflicts?: string[];
+        };
+
+        if (encryptedDoc.d) {
+          try {
+            const doc = await this.decryptDoc(encryptedDoc);
+            docs.push(doc);
+
+            // Check for conflicts
+            if (encryptedDoc._conflicts && encryptedDoc._conflicts.length > 0) {
+              const conflictInfo = await this.buildConflictInfo(
+                encryptedDoc._id,
+                encryptedDoc._rev!,
+                encryptedDoc._conflicts,
+                doc,
+              );
+              conflicts.push(conflictInfo);
+            }
+          } catch (error) {
+            errors.push({
+              docId: encryptedDoc._id,
+              error: error instanceof Error ? error : new Error(String(error)),
+              rawDoc: encryptedDoc,
+            });
+          }
+        }
+      }
+
+      if (docs.length > 0) {
+        this.listener.onChange(docs);
+      }
+      if (errors.length > 0 && this.listener.onError) {
+        this.listener.onError(errors);
+      }
+      if (conflicts.length > 0 && this.listener.onConflict) {
+        this.listener.onConflict(conflicts);
+      }
     } catch (error) {
-      console.warn(
-        "[EncryptedStore] db.changes() not available, falling back to subscription only",
-      );
+      console.error("[EncryptedStore] loadAll failed:", error);
     }
 
-    // Fire initial docsAdded for everything, grouped by table
-    if (docs.length > 0) {
-      const events = this.groupByTable(docs, fullIdMap);
-      this.listener.docsAdded(events);
-    }
-
-    // Fire decryptionError events if any
-    if (decryptionErrors.length > 0 && this.listener.decryptionError) {
-      this.listener.decryptionError(decryptionErrors);
-    }
+    this.setupSubscription();
   }
 
   /** Create or update a document */
-  async put(type: string, doc: any): Promise<Doc> {
-    // Generate ID if not provided
+  async put(table: string, doc: any): Promise<Doc> {
     if (!doc._id) {
-      doc._id = this.generateId();
+      doc._id =
+        crypto.randomUUID?.() ||
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
 
-    // Build full ID with type prefix
-    const fullId = `${type}_${doc._id}`;
-
-    // Encrypt the document
+    const fullId = `${table}_${doc._id}`;
     const encryptedDoc = await this.encryptDoc(doc, fullId);
 
-    // Store in Fireproof
+    // Preserve _rev if document exists
+    try {
+      const existing = await this.db.get(fullId);
+      encryptedDoc._rev = existing._rev;
+    } catch {
+      // Document doesn't exist, that's fine
+    }
+
     await this.db.put(encryptedDoc);
 
-    // Fireproof's subscribe will trigger handleChange()
-    // which will reload, compute diff, and fire events
-
-    return doc;
+    return { ...doc, _table: table };
   }
 
-  /** Get a document (returns null if not found) */
-  async get(type: string, id: string): Promise<Doc | null> {
-    const fullId = `${type}_${id}`;
+  /** Get a document by table and id */
+  async get(table: string, id: string): Promise<Doc | null> {
     try {
-      const encryptedDoc = await this.db.get(fullId);
-      return await this.decryptDoc(encryptedDoc, id);
-    } catch (error) {
-      // Document not found
+      const fullId = `${table}_${id}`;
+      const encryptedDoc = (await this.db.get(fullId, {
+        conflicts: true,
+      })) as EncryptedDoc & { _conflicts?: string[] };
+
+      const doc = await this.decryptDoc(encryptedDoc);
+
+      // Notify about conflicts if present
+      if (
+        encryptedDoc._conflicts &&
+        encryptedDoc._conflicts.length > 0 &&
+        this.listener.onConflict
+      ) {
+        const conflictInfo = await this.buildConflictInfo(
+          encryptedDoc._id,
+          encryptedDoc._rev!,
+          encryptedDoc._conflicts,
+          doc,
+        );
+        this.listener.onConflict([conflictInfo]);
+      }
+
+      return doc;
+    } catch {
       return null;
     }
   }
 
   /** Delete a document */
-  async delete(type: string, id: string): Promise<void> {
-    // Build full ID with type prefix
-    const fullId = `${type}_${id}`;
-
-    // Delete from Fireproof
-    await this.db.del(fullId);
-
-    // Fireproof's subscribe will trigger handleChange()
-    // which will detect the deletion and fire docsDeleted event
+  async delete(table: string, id: string): Promise<void> {
+    const fullId = `${table}_${id}`;
+    try {
+      const doc = await this.db.get(fullId);
+      await this.db.remove(doc);
+    } catch (error) {
+      console.warn(`[EncryptedStore] Could not delete ${fullId}:`, error);
+    }
   }
 
-  /** Connect to remote sync with any Fireproof connector */
-  async connectRemote(
-    connector: ConnectorFunction,
-    options: RemoteConnectOptions,
-  ): Promise<void> {
+  /** Get all documents (optionally filtered by table) */
+  async getAll(table?: string): Promise<Doc[]> {
+    const result = await this.db.allDocs({
+      include_docs: true,
+      conflicts: true,
+    });
+
+    const docs: Doc[] = [];
+    const errors: DecryptionErrorEvent[] = [];
+
+    for (const row of result.rows) {
+      if (!row.doc || row.id.startsWith("_design/")) continue;
+
+      const encryptedDoc = row.doc as EncryptedDoc;
+
+      if (encryptedDoc.d) {
+        try {
+          const doc = await this.decryptDoc(encryptedDoc);
+          if (!table || doc._table === table) {
+            docs.push(doc);
+          }
+        } catch (error) {
+          errors.push({
+            docId: encryptedDoc._id,
+            error: error instanceof Error ? error : new Error(String(error)),
+            rawDoc: encryptedDoc,
+          });
+        }
+      }
+    }
+
+    if (errors.length > 0 && this.listener.onError) {
+      this.listener.onError(errors);
+    }
+
+    return docs;
+  }
+
+  /** Connect to remote CouchDB for sync */
+  async connectRemote(options: RemoteOptions): Promise<void> {
     this.disconnectRemote();
 
-    try {
-      console.log(
-        `[EncryptedStore] Connecting to ${options.host} with namespace: ${options.namespace}`,
-      );
+    const syncOptions: PouchDB.Replication.SyncOptions = {
+      live: options.live ?? true,
+      retry: options.retry ?? true,
+    };
 
-      // Call the connector function
-      const connection = connector(this.db, options.namespace, options.host);
+    this.syncHandler = this.db.sync(options.url, syncOptions);
 
-      // Store connection
-      this.connection = {
-        ready: connection.ready || Promise.resolve(),
-        disconnect: connection.disconnect,
-      };
-
-      // Wait for connection to be ready
-      await this.connection.ready;
-      console.log(`[EncryptedStore] ✓ Connected to remote`);
-    } catch (error) {
-      console.error(`[EncryptedStore] ✗ Failed to connect:`, error);
-      this.connection = null;
-      throw error;
+    // Setup sync event listeners
+    if (this.listener.onSync) {
+      this.syncHandler
+        .on("change", (info) => {
+          if (this.listener.onSync) {
+            this.listener.onSync({
+              direction: info.direction as "push" | "pull",
+              change: info.change,
+            });
+          }
+        })
+        .on("error", (err) => {
+          console.error("[EncryptedStore] sync error:", err);
+        });
     }
+
+    // Wait for initial sync to start
+    return new Promise<void>((resolve, reject) => {
+      let resolved = false;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve();
+        }
+      }, 5000);
+
+      this.syncHandler!.on("active", () => {
+        if (!resolved) {
+          clearTimeout(timeout);
+          resolved = true;
+          resolve();
+        }
+      });
+
+      this.syncHandler!.on("error", (err) => {
+        if (!resolved) {
+          clearTimeout(timeout);
+          resolved = true;
+          reject(err);
+        }
+      });
+    });
   }
 
   /** Disconnect from remote sync */
   disconnectRemote(): void {
-    if (this.connection && this.connection.disconnect) {
-      this.connection.disconnect();
-      console.log("[EncryptedStore] Disconnected from remote");
-    }
-    this.connection = null;
-  }
-
-  /** Reconnect subscription to ensure remote changes are received */
-  reconnect(): void {
-    // Cancel existing subscription if any
-    if (this.unsubscribe) {
-      console.log("[EncryptedStore] Canceling existing subscription");
-      this.unsubscribe();
-      this.unsubscribe = null;
-      this.isSubscribed = false;
-    }
-
-    // Re-subscribe to database changes
-    // We treat subscription as a "something changed" notification
-    // and always query db.changes() to get actual changes (external indexer pattern)
-    console.log("[EncryptedStore] Reconnecting subscription (remote=true)");
-    this.unsubscribe = this.db.subscribe(() => {
-      console.log(
-        "[EncryptedStore] Subscription notified - querying db.changes()",
-      );
-      this.handleChange().catch((err) => {
-        console.error("EncryptedStore: Error handling change:", err);
-      });
-    }, true); // Include remote changes
-    this.isSubscribed = true;
-  }
-
-  /** Read all encrypted documents (without decrypting) */
-  private async readAllEncrypted(): Promise<{
-    encryptedMap: Map<string, string>;
-    fullIdMap: Map<string, string>;
-  }> {
-    const result = await this.db.query("_id", { descending: false });
-    const encryptedMap = new Map<string, string>();
-    const fullIdMap = new Map<string, string>();
-
-    // Get docs from either result.docs or result.rows
-    const allDocs =
-      result.docs || result.rows.map((row) => row.doc).filter(Boolean);
-
-    for (const doc of allDocs) {
-      try {
-        const { type, id } = this.parseFullId(doc._id);
-        encryptedMap.set(id, doc.d); // Store encrypted data
-        fullIdMap.set(id, doc._id); // Map "alice" -> "users_alice"
-      } catch (error) {
-        // Skip documents with invalid ID format
-      }
-    }
-
-    return { encryptedMap, fullIdMap };
-  }
-
-  /**
-   * Query db.changes() and process any new changes (external indexer pattern)
-   * This is called whenever the subscription fires
-   */
-  private async handleChange(): Promise<void> {
-    try {
-      // Query changes since last clock
-      const result = await this.db.changes(this.clock);
-      console.log(
-        `[EncryptedStore] db.changes() returned ${result.rows.length} changes`,
-      );
-
-      if (result.rows.length === 0) {
-        return;
-      }
-
-      // Update clock first
-      this.clock = result.clock;
-
-      // Transform db.changes() format to processable format
-      // db.changes() returns { key, value: { _id, d }, clock }
-      const changes = result.rows.map((row) => row.value);
-
-      const newDocs: Doc[] = [];
-      const changedDocs: Doc[] = [];
-      const deletedDocs: Array<{ _id: string }> = [];
-      const decryptionErrors: DecryptionErrorEvent[] = [];
-
-      for (const change of changes) {
-        if (change.d) {
-          // Has encrypted data - it's a create or update
-          try {
-            const { type, id } = this.parseFullId(change._id);
-
-            // Decrypt the document
-            const decrypted = await this.decryptFromEncryptedData(change.d, id);
-
-            // Check if it's new or changed
-            if (this.knownIds.has(id)) {
-              changedDocs.push(decrypted);
-            } else {
-              newDocs.push(decrypted);
-              this.knownIds.add(id);
-              this.fullIdMap.set(id, change._id); // Update fullIdMap for new docs
-            }
-          } catch (error) {
-            // Track documents we can't decrypt
-            decryptionErrors.push({
-              docId: change._id,
-              error: error instanceof Error ? error : new Error(String(error)),
-              doc: change,
-            });
-          }
-        } else {
-          // No encrypted data - it's a deletion
-          try {
-            const { type, id } = this.parseFullId(change._id);
-
-            if (this.knownIds.has(id)) {
-              deletedDocs.push({ _id: id });
-              this.knownIds.delete(id);
-              // Keep fullIdMap entry for the deletion event, remove after
-            }
-          } catch (error) {
-            // Skip invalid IDs
-          }
-        }
-      }
-
-      // Fire events grouped by table
-      console.log(
-        `[EncryptedStore] Firing events: ${newDocs.length} new, ${changedDocs.length} changed, ${deletedDocs.length} deleted, ${decryptionErrors.length} decryption errors`,
-      );
-      if (newDocs.length > 0) {
-        const events = this.groupByTable(newDocs, this.fullIdMap);
-        this.listener.docsAdded(events);
-      }
-      if (changedDocs.length > 0) {
-        const events = this.groupByTable(changedDocs, this.fullIdMap);
-        this.listener.docsChanged(events);
-      }
-      if (deletedDocs.length > 0) {
-        const events = this.groupDeletedByTable(deletedDocs);
-        this.listener.docsDeleted(events);
-
-        // Clean up fullIdMap entries for deleted docs
-        for (const doc of deletedDocs) {
-          this.fullIdMap.delete(doc._id);
-        }
-      }
-      if (decryptionErrors.length > 0 && this.listener.decryptionError) {
-        this.listener.decryptionError(decryptionErrors);
-      }
-    } catch (error) {
-      console.error("[EncryptedStore] db.changes() failed:", error);
+    if (this.syncHandler) {
+      this.syncHandler.cancel();
+      this.syncHandler = null;
     }
   }
 
-  private async decryptFromEncryptedData(
-    encryptedData: string,
+  /** Resolve a conflict by choosing the winner */
+  async resolveConflict(
+    table: string,
     id: string,
-  ): Promise<Doc> {
-    // Decrypt the data
-    const decryptedJson = await this.encryptionHelper.decrypt(encryptedData);
-    const decryptedData = JSON.parse(decryptedJson);
+    winningDoc: Doc,
+  ): Promise<void> {
+    const fullId = `${table}_${id}`;
 
-    // Build final document
-    const doc: Doc = {
-      _id: id,
-      ...decryptedData,
+    const doc = (await this.db.get(fullId, { conflicts: true })) as any;
+
+    if (!doc._conflicts || doc._conflicts.length === 0) {
+      throw new Error(`No conflicts found for ${fullId}`);
+    }
+
+    // Update with winning document
+    await this.put(table, winningDoc);
+
+    // Remove all conflicting revisions
+    for (const rev of doc._conflicts) {
+      try {
+        await this.db.remove(fullId, rev);
+      } catch (error) {
+        console.warn(`Failed to remove conflict ${fullId}@${rev}:`, error);
+      }
+    }
+  }
+
+  /** Check if a document has conflicts without triggering the callback */
+  async getConflictInfo(
+    table: string,
+    id: string,
+  ): Promise<ConflictInfo | null> {
+    try {
+      const fullId = `${table}_${id}`;
+      const encryptedDoc = (await this.db.get(fullId, {
+        conflicts: true,
+      })) as EncryptedDoc & { _conflicts?: string[] };
+
+      if (!encryptedDoc._conflicts || encryptedDoc._conflicts.length === 0) {
+        return null;
+      }
+
+      const doc = await this.decryptDoc(encryptedDoc);
+
+      return await this.buildConflictInfo(
+        encryptedDoc._id,
+        encryptedDoc._rev!,
+        encryptedDoc._conflicts,
+        doc,
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /** Re-subscribe to changes (useful after disconnect/reconnect) */
+  reconnect(): void {
+    if (this.changesHandler) {
+      this.changesHandler.cancel();
+      this.changesHandler = null;
+    }
+    this.setupSubscription();
+  }
+
+  private setupSubscription(): void {
+    this.changesHandler = this.db
+      .changes({
+        since: "now",
+        live: true,
+        include_docs: true,
+        conflicts: true,
+      })
+      .on("change", (change) => {
+        this.processingChain = this.processingChain
+          .then(() => this.handleChange(change))
+          .catch((err) =>
+            console.error("[EncryptedStore] handleChange error:", err),
+          );
+      })
+      .on("error", (err) => {
+        console.error("[EncryptedStore] changes feed error:", err);
+      });
+  }
+
+  private async handleChange(
+    change: PouchDB.Core.ChangesResponseChange<any>,
+  ): Promise<void> {
+    if (change.id.startsWith("_design/")) return;
+
+    const encryptedDoc = change.doc as
+      | (EncryptedDoc & { _conflicts?: string[] })
+      | undefined;
+
+    // Deletion
+    if (change.deleted || !encryptedDoc?.d) {
+      const parsed = this.parseFullId(change.id);
+      if (parsed) {
+        this.listener.onDelete([{ _id: parsed.id, _table: parsed.table }]);
+      }
+      return;
+    }
+
+    // Changed/added document
+    const errors: DecryptionErrorEvent[] = [];
+    const conflicts: ConflictInfo[] = [];
+
+    try {
+      const doc = await this.decryptDoc(encryptedDoc);
+
+      // Check for conflicts
+      if (encryptedDoc._conflicts && encryptedDoc._conflicts.length > 0) {
+        const conflictInfo = await this.buildConflictInfo(
+          encryptedDoc._id,
+          encryptedDoc._rev!,
+          encryptedDoc._conflicts,
+          doc,
+        );
+        conflicts.push(conflictInfo);
+      }
+
+      this.listener.onChange([doc]);
+    } catch (error) {
+      errors.push({
+        docId: encryptedDoc._id,
+        error: error instanceof Error ? error : new Error(String(error)),
+        rawDoc: encryptedDoc,
+      });
+    }
+
+    if (errors.length > 0 && this.listener.onError) {
+      this.listener.onError(errors);
+    }
+    if (conflicts.length > 0 && this.listener.onConflict) {
+      this.listener.onConflict(conflicts);
+    }
+  }
+
+  private async buildConflictInfo(
+    fullId: string,
+    currentRev: string,
+    conflictRevs: string[],
+    winnerDoc: Doc,
+  ): Promise<ConflictInfo> {
+    const parsed = this.parseFullId(fullId);
+    if (!parsed) {
+      throw new Error(`Invalid ID format: ${fullId}`);
+    }
+
+    const losers: Doc[] = [];
+    const errors: DecryptionErrorEvent[] = [];
+
+    for (const rev of conflictRevs) {
+      try {
+        const conflictDoc = (await this.db.get(fullId, {
+          rev,
+        })) as EncryptedDoc;
+        const decrypted = await this.decryptDoc(conflictDoc);
+        losers.push(decrypted);
+      } catch (error) {
+        errors.push({
+          docId: `${fullId}@${rev}`,
+          error: error instanceof Error ? error : new Error(String(error)),
+          rawDoc: { _id: fullId, _rev: rev },
+        });
+      }
+    }
+
+    if (errors.length > 0 && this.listener.onError) {
+      this.listener.onError(errors);
+    }
+
+    return {
+      docId: fullId,
+      table: parsed.table,
+      id: parsed.id,
+      currentRev,
+      conflictRevs,
+      winner: winnerDoc,
+      losers,
     };
+  }
 
-    return doc;
+  private async decryptDoc(encryptedDoc: EncryptedDoc): Promise<Doc> {
+    const parsed = this.parseFullId(encryptedDoc._id);
+    if (!parsed) throw new Error(`Invalid ID format: ${encryptedDoc._id}`);
+
+    const decrypted = JSON.parse(
+      await this.encryptionHelper.decrypt(encryptedDoc.d),
+    );
+    return { _id: parsed.id, _table: parsed.table, ...decrypted };
   }
 
   private async encryptDoc(doc: any, fullId: string): Promise<EncryptedDoc> {
-    // Extract fields to encrypt (everything except _id)
-    const dataToEncrypt: any = {};
+    const data: Record<string, any> = {};
     for (const [key, value] of Object.entries(doc)) {
       if (!key.startsWith("_")) {
-        dataToEncrypt[key] = value;
+        data[key] = value;
       }
     }
 
-    // Encrypt as JSON
-    const encrypted = await this.encryptionHelper.encrypt(
-      JSON.stringify(dataToEncrypt),
-    );
-
-    // Build encrypted doc
-    const encryptedDoc: EncryptedDoc = {
-      _id: fullId,
-      d: encrypted,
-    };
-
-    return encryptedDoc;
-  }
-
-  private async decryptDoc(encryptedDoc: any, id: string): Promise<Doc> {
-    // Decrypt the 'd' field
-    const decryptedJson = await this.encryptionHelper.decrypt(encryptedDoc.d);
-    const decryptedData = JSON.parse(decryptedJson);
-
-    // Build final document
-    const doc: Doc = {
-      _id: id,
-      ...decryptedData,
-    };
-
-    return doc;
-  }
-
-  private parseFullId(fullId: string): { type: string; id: string } {
-    const firstUnderscore = fullId.indexOf("_");
-    if (firstUnderscore === -1) {
-      throw new Error(`Invalid document ID format: ${fullId}`);
-    }
     return {
-      type: fullId.substring(0, firstUnderscore),
-      id: fullId.substring(firstUnderscore + 1),
+      _id: fullId,
+      d: await this.encryptionHelper.encrypt(JSON.stringify(data)),
     };
   }
 
-  private generateId(): string {
-    // Use crypto.randomUUID if available, otherwise fallback
-    if (typeof crypto !== "undefined" && crypto.randomUUID) {
-      return crypto.randomUUID();
-    }
-    // Fallback for environments without crypto.randomUUID
-    return `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
-  }
-
-  private groupByTable(
-    docs: Doc[],
-    fullIdMap: Map<string, string>,
-  ): TableEvent[] {
-    const grouped = new Map<string, Doc[]>();
-
-    for (const doc of docs) {
-      const fullId = fullIdMap.get(doc._id);
-      if (fullId) {
-        const { type } = this.parseFullId(fullId);
-        if (!grouped.has(type)) {
-          grouped.set(type, []);
-        }
-        grouped.get(type)!.push(doc);
-      }
-    }
-
-    return Array.from(grouped.entries()).map(([table, docs]) => ({
-      table,
-      docs,
-    }));
-  }
-
-  private groupDeletedByTable(
-    deletedDocs: Array<{ _id: string }>,
-  ): TableEvent[] {
-    const grouped = new Map<string, Array<{ _id: string }>>();
-
-    for (const doc of deletedDocs) {
-      const fullId = this.fullIdMap.get(doc._id);
-      if (fullId) {
-        const { type } = this.parseFullId(fullId);
-        if (!grouped.has(type)) {
-          grouped.set(type, []);
-        }
-        grouped.get(type)!.push(doc);
-      }
-    }
-
-    return Array.from(grouped.entries()).map(([table, docs]) => ({
-      table,
-      docs: docs as any, // Cast since deletedDocs is simpler structure
-    }));
+  private parseFullId(fullId: string): { table: string; id: string } | null {
+    const idx = fullId.indexOf("_");
+    if (idx === -1) return null;
+    return { table: fullId.slice(0, idx), id: fullId.slice(idx + 1) };
   }
 }

@@ -1,16 +1,20 @@
 # Encrypted Store
 
-Client-side encrypted storage with change detection for PWAs. Built on [Fireproof](https://use-fireproof.com).
+Client-side encrypted document storage with change detection using PouchDB and AES-256-GCM encryption.
 
-**For small data that can live in memory** - Designed for PWAs that manage datasets that fit comfortably in browser memory.
+**Simple API for offline-first apps** - PUT, GET, DELETE documents with automatic sync to CouchDB.
 
 ## Features
 
-- 🔐 AES-256-GCM encryption before storage
-- 🔄 Real-time change detection (added/changed/deleted events)
-- 📱 PWA-ready with offline-first support
-- 🌐 Optional remote sync (PartyKit, Netlify)
-- 📦 TypeScript with full type safety
+- 🔐 AES-256-GCM encryption with WebCrypto API
+- 📦 Simple document API: `put`, `get`, `delete`, `getAll`
+- 🔄 Real-time change detection (`onChange`, `onDelete`)
+- ⚠️ Conflict detection and resolution
+- 🌐 Sync to CouchDB (or any PouchDB-compatible server)
+- 📊 Sync progress events
+- 🔌 Offline-first with automatic retry
+- 📱 Works in browser and Node.js
+- 🎯 TypeScript with full type safety
 
 ## Installation
 
@@ -21,272 +25,408 @@ npm install @mrbelloc/encrypted-store
 ## Quick Start
 
 ```typescript
-import { EncryptedStore, fireproof } from "@mrbelloc/encrypted-store";
+import PouchDB from 'pouchdb';
+import { EncryptedStore } from '@mrbelloc/encrypted-store';
 
 // Create database and encrypted store
-const db = fireproof("myapp");
-const store = new EncryptedStore(db, "my-password", {
-  docsAdded: (events) => {
-    events.forEach(({ table, docs }) => {
-      console.log(`New ${table}:`, docs);
-    });
+const db = new PouchDB('myapp');
+const store = new EncryptedStore(db, 'my-password', {
+  onChange: (docs) => {
+    console.log('Documents changed:', docs);
   },
-  docsChanged: (events) => {
-    events.forEach(({ table, docs }) => {
-      console.log(`Updated ${table}:`, docs);
-    });
+  onDelete: (docs) => {
+    console.log('Documents deleted:', docs);
   },
-  docsDeleted: (events) => {
-    events.forEach(({ table, docs }) => {
-      console.log(`Deleted ${table}:`, docs);
-    });
+  onConflict: (conflicts) => {
+    console.log('Conflicts detected:', conflicts);
   },
-  decryptionError: (events) => {
-    events.forEach(({ docId, error, doc }) => {
-      console.error(`Failed to decrypt ${docId}:`, error.message);
-      console.log("Raw encrypted document:", doc);
-    });
+  onSync: (info) => {
+    console.log('Sync progress:', info);
   },
+  onError: (errors) => {
+    console.error('Decryption errors:', errors);
+  }
 });
 
-// Load existing data
+// Load existing data and start change detection
 await store.loadAll();
 
 // Create/update documents
-await store.put("users", { _id: "alice", name: "Alice", age: 30 });
+await store.put('expenses', { 
+  _id: 'lunch', 
+  amount: 15.50, 
+  date: '2024-01-15' 
+});
 
-// Get documents
-const user = await store.get("users", "alice");
+// Get a document
+const expense = await store.get('expenses', 'lunch');
+console.log(expense); // { _id: 'lunch', _table: 'expenses', amount: 15.50, date: '2024-01-15' }
 
-// Delete documents
-await store.delete("users", "alice");
+// Get all documents (optionally filtered by table)
+const allExpenses = await store.getAll('expenses');
+const allDocs = await store.getAll();
+
+// Delete a document
+await store.delete('expenses', 'lunch');
+
+// Sync to CouchDB
+await store.connectRemote({
+  url: 'http://localhost:5984/myapp',
+  live: true,
+  retry: true
+});
 ```
 
 ## API Reference
 
-### `new EncryptedStore(db, password, listener)`
+### `new EncryptedStore(db, password, listener?)`
 
 Creates an encrypted store.
 
-- `db`: Fireproof database instance
+- `db`: PouchDB database instance
 - `password`: Encryption password (string)
-- `listener`: Object with callbacks:
-  - `docsAdded(events: TableEvent[])`: Fired when new documents are added
-  - `docsChanged(events: TableEvent[])`: Fired when documents are updated
-  - `docsDeleted(events: TableEvent[])`: Fired when documents are deleted
-  - `decryptionError?(events: DecryptionErrorEvent[])`: Optional. Fired when documents fail to decrypt
+- `listener`: Optional object with callbacks
 
-Each `TableEvent` has:
+### Listener Callbacks
 
-- `table`: Document type (e.g., "users", "transactions")
-- `docs`: Array of documents with that type
+```typescript
+interface StoreListener {
+  onChange: (docs: Doc[]) => void;
+  onDelete: (docs: Doc[]) => void;
+  onConflict?: (conflicts: ConflictInfo[]) => void;
+  onSync?: (info: SyncInfo) => void;
+  onError?: (errors: DecryptionErrorEvent[]) => void;
+}
+```
 
-Each `DecryptionErrorEvent` has:
-
-- `docId`: Full document ID that failed to decrypt (e.g., "users_alice")
-- `error`: Error object with details about why decryption failed
-- `doc`: The raw encrypted document from Fireproof (includes `_id` and `d` fields)
+- **`onChange(docs)`**: Called when documents are added or updated
+- **`onDelete(docs)`**: Called when documents are deleted
+- **`onConflict(conflicts)`**: Called when conflicts are detected
+- **`onSync(info)`**: Called during sync operations
+- **`onError(errors)`**: Called when documents fail to decrypt
 
 ### `await store.loadAll()`
 
-Loads all existing documents and sets up change detection. Call this once after creating the store.
+Loads all existing documents and starts change detection. Call this once after creating the store.
 
-### `await store.put(type, doc)`
+### `await store.put(table, doc)`
 
 Creates or updates a document.
 
-- `type`: Document type / table name (string)
-- `doc`: Document object with `_id` field (will be generated if missing)
+- `table`: Document type (e.g., "expenses", "tasks")
+- `doc`: Document object with optional `_id` field (generated if missing)
 
-Returns the document.
+Returns the document with `_table` field added.
 
-### `await store.get(type, id)`
+### `await store.get(table, id)`
 
-Retrieves a document by type and ID. Returns `null` if not found.
+Gets a document by table and ID. Returns `null` if not found.
 
-### `await store.delete(type, id)`
+### `await store.delete(table, id)`
 
-Deletes a document by type and ID.
+Deletes a document by table and ID.
 
-## Remote Sync
+### `await store.getAll(table?)`
 
-Sync encrypted data across devices with any Fireproof connector:
-
-```typescript
-// Install the connector you want
-// npm install @fireproof/partykit
-// or
-// npm install @fireproof/netlify
-
-import { connect } from "@fireproof/partykit";
-// or
-// import { connect } from "@fireproof/netlify";
-
-// Connect using the connector function
-await store.connectRemote(connect, {
-  namespace: "my-app",
-  host: "http://localhost:1999", // or your server URL
-});
-
-// Disconnect
-store.disconnectRemote();
-
-// Works with any connector that follows the Fireproof connector interface
-```
-
-**Note:** Remote servers only see encrypted blobs - they cannot read your data.
-
-### Testing Remote Sync
-
-To test that remote sync is working:
-
-1. **Connect to a remote server** using one of the Fireproof connectors (PartyKit, Netlify, etc.)
-2. **Monitor decryption errors** - If data arrives from another client encrypted with a different password or corrupted, you'll receive `decryptionError` events
-3. **Use the decryptionError callback** to verify connectivity and detect synchronization issues
+Gets all documents, optionally filtered by table.
 
 ```typescript
-const store = new EncryptedStore(db, "my-password", {
-  docsAdded: (events) => {
-    console.log("✓ Received new documents from remote");
-  },
-  docsChanged: (events) => {
-    console.log("✓ Received document updates from remote");
-  },
-  docsDeleted: (events) => {
-    console.log("✓ Received document deletions from remote");
-  },
-  decryptionError: (events) => {
-    // This fires when remote data can't be decrypted
-    // Useful for detecting sync issues or password mismatches
-    events.forEach(({ docId, error, doc }) => {
-      console.warn(`⚠ Failed to decrypt ${docId}:`, error.message);
-      console.log("Raw encrypted document available for debugging:", doc);
-    });
-  },
-});
+const allExpenses = await store.getAll('expenses');
+const allDocs = await store.getAll();
+```
 
-await store.connectRemote(connect, {
-  namespace: "my-app",
-  host: "http://localhost:1999",
+### `await store.connectRemote(options)`
+
+Connects to a remote CouchDB server for sync.
+
+```typescript
+interface RemoteOptions {
+  url: string;        // CouchDB URL
+  live?: boolean;     // Continuous sync (default: true)
+  retry?: boolean;    // Auto-retry on failure (default: true)
+}
+```
+
+### `store.disconnectRemote()`
+
+Disconnects from remote sync.
+
+### `await store.getConflictInfo(table, id)`
+
+Check if a document has conflicts without triggering the callback. Returns `ConflictInfo` if conflicts exist, or `null` if none.
+
+```typescript
+const conflictInfo = await store.getConflictInfo('expenses', 'lunch');
+if (conflictInfo) {
+  console.log('Conflict detected!');
+  console.log('Winner:', conflictInfo.winner);
+  console.log('Losers:', conflictInfo.losers);
+  // Handle the conflict
+}
+```
+
+### `await store.resolveConflict(table, id, winningDoc)`
+
+Manually resolve a conflict by choosing the winning document.
+
+```typescript
+// Option 1: Use in onConflict callback
+store.listener.onConflict = async (conflicts) => {
+  for (const conflict of conflicts) {
+    // Pick the document with the latest timestamp
+    const latest = [conflict.winner, ...conflict.losers]
+      .sort((a, b) => b.timestamp - a.timestamp)[0];
+    
+    await store.resolveConflict(conflict.table, conflict.id, latest);
+  }
+};
+
+// Option 2: Check manually and resolve
+const conflict = await store.getConflictInfo('expenses', 'lunch');
+if (conflict) {
+  await store.resolveConflict('expenses', 'lunch', conflict.winner);
+}
+```
+
+## Conflict Detection
+
+When the same document is edited offline on multiple devices, PouchDB detects conflicts automatically:
+
+```typescript
+interface ConflictInfo {
+  docId: string;         // Full document ID (e.g., "expenses_lunch")
+  table: string;         // Document table (e.g., "expenses")
+  id: string;            // Document ID (e.g., "lunch")
+  currentRev: string;    // Current revision ID
+  conflictRevs: string[];// Conflicting revision IDs
+  winner: Doc;           // The winning document (current version)
+  losers: Doc[];         // Conflicting versions
+}
+```
+
+The `onConflict` callback gives you both the winner and all conflicting versions, so you can:
+- Show a UI for manual resolution
+- Auto-resolve based on timestamps
+- Merge changes programmatically
+- Log conflicts for review
+
+## Sync Events
+
+Monitor sync progress with the `onSync` callback:
+
+```typescript
+interface SyncInfo {
+  direction: 'push' | 'pull' | 'both';
+  change: {
+    docs_read?: number;
+    docs_written?: number;
+    doc_write_failures?: number;
+    errors?: any[];
+  };
+}
+```
+
+Example:
+
+```typescript
+const store = new EncryptedStore(db, password, {
+  onChange: (docs) => console.log('Changed:', docs.length),
+  onDelete: (docs) => console.log('Deleted:', docs.length),
+  onSync: (info) => {
+    if (info.direction === 'push') {
+      console.log(`Pushed ${info.change.docs_written} docs to server`);
+    } else {
+      console.log(`Pulled ${info.change.docs_read} docs from server`);
+    }
+  }
 });
 ```
 
-**Important:** Unlike traditional databases like CouchDB/PouchDB, Fireproof connectors don't provide connection status events. The subscription mechanism handles both local and remote changes automatically. Monitor the event callbacks to verify sync is working.
+## Deployment Options
 
-## Decryption Error Handling
+### Free Tier Options
 
-The store automatically handles documents that fail to decrypt:
+1. **IBM Cloudant** - Free tier: 1GB storage, 20 req/sec
+   ```typescript
+   await store.connectRemote({
+     url: 'https://username:password@username.cloudant.com/mydb'
+   });
+   ```
 
-- **Wrong password**: Documents encrypted with a different password will trigger `decryptionError` events
-- **Corrupted data**: Malformed or corrupted encrypted data is caught and reported
-- **Graceful degradation**: Successfully decrypted documents are still processed; failures don't stop the store
-- **Remote sync issues**: Detect when remote clients are using different passwords or sending corrupted data
+2. **Oracle Cloud Free Tier** - Run your own CouchDB
+   ```bash
+   # On Oracle VM
+   docker run -d -p 5984:5984 -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=password couchdb
+   ```
 
-This is especially useful when:
-- Testing remote sync connectivity
-- Debugging encryption/decryption issues
-- Detecting data corruption
-- Monitoring multi-client scenarios with different encryption keys
+3. **Self-hosted** - CouchDB on any VPS ($5/month)
+   ```typescript
+   await store.connectRemote({
+     url: 'http://admin:password@your-server.com:5984/mydb'
+   });
+   ```
 
-## How It Works
+### Backup Strategy
 
-1. **Encryption**: Documents are encrypted with AES-256-GCM before storage
-2. **Storage**: Encrypted blobs stored in Fireproof (local-first IndexedDB)
-3. **Change Detection**: Fireproof's subscribe notifies us of changes
-4. **Diff Computation**: We track IDs and decrypt only changed documents
-5. **Events**: Your app gets organized events by table (added/changed/deleted)
-6. **Error Handling**: Failed decryptions are reported via optional callback
+Example using Oracle Free Tier + S3:
+
+```bash
+# Daily backup script
+#!/bin/bash
+TODAY=$(date +%Y-%m-%d)
+curl -X GET http://admin:password@localhost:5984/mydb/_all_docs?include_docs=true > backup-$TODAY.json
+aws s3 cp backup-$TODAY.json s3://my-backups/couchdb/
+```
 
 ## Example: React Integration
 
 ```typescript
-import { useState, useEffect } from "react";
-import { EncryptedStore, fireproof } from "@mrbelloc/encrypted-store";
+import { useState, useEffect } from 'react';
+import PouchDB from 'pouchdb';
+import { EncryptedStore } from '@mrbelloc/encrypted-store';
 
 function useEncryptedStore(dbName: string, password: string) {
-  const [users, setUsers] = useState<Map<string, any>>(new Map());
+  const [expenses, setExpenses] = useState<Map<string, any>>(new Map());
   const [store, setStore] = useState<EncryptedStore | null>(null);
 
   useEffect(() => {
-    const db = fireproof(dbName);
+    const db = new PouchDB(dbName);
     const encryptedStore = new EncryptedStore(db, password, {
-      docsAdded: (events) => {
-        events.forEach(({ table, docs }) => {
-          if (table === "users") {
-            setUsers((prev) => {
-              const next = new Map(prev);
-              docs.forEach((doc) => next.set(doc._id, doc));
-              return next;
-            });
-          }
+      onChange: (docs) => {
+        setExpenses((prev) => {
+          const next = new Map(prev);
+          docs.forEach((doc) => {
+            if (doc._table === 'expenses') {
+              next.set(doc._id, doc);
+            }
+          });
+          return next;
         });
       },
-      docsChanged: (events) => {
-        events.forEach(({ table, docs }) => {
-          if (table === "users") {
-            setUsers((prev) => {
-              const next = new Map(prev);
-              docs.forEach((doc) => next.set(doc._id, doc));
-              return next;
-            });
-          }
+      onDelete: (docs) => {
+        setExpenses((prev) => {
+          const next = new Map(prev);
+          docs.forEach((doc) => {
+            if (doc._table === 'expenses') {
+              next.delete(doc._id);
+            }
+          });
+          return next;
         });
       },
-      docsDeleted: (events) => {
-        events.forEach(({ table, docs }) => {
-          if (table === "users") {
-            setUsers((prev) => {
-              const next = new Map(prev);
-              docs.forEach((doc) => next.delete(doc._id));
-              return next;
-            });
-          }
+      onConflict: (conflicts) => {
+        // Auto-resolve: pick latest by timestamp
+        conflicts.forEach(async (conflict) => {
+          const latest = [conflict.winner, ...conflict.losers]
+            .sort((a, b) => b.timestamp - a.timestamp)[0];
+          await encryptedStore.resolveConflict(conflict.table, conflict.id, latest);
         });
-      },
-      decryptionError: (events) => {
-        // Handle decryption errors (optional)
-        events.forEach(({ docId, error, doc }) => {
-          console.error(`Failed to decrypt ${docId}:`, error.message);
-          // Raw encrypted document is available in doc.d if needed
-        });
-      },
+      }
     });
 
     encryptedStore.loadAll();
     setStore(encryptedStore);
+
+    return () => {
+      encryptedStore.disconnectRemote();
+    };
   }, [dbName, password]);
 
-  return { users: Array.from(users.values()), store };
+  return { expenses: Array.from(expenses.values()), store };
+}
+
+function App() {
+  const { expenses, store } = useEncryptedStore('myapp', 'my-password');
+
+  const addExpense = async () => {
+    await store?.put('expenses', {
+      _id: crypto.randomUUID(),
+      amount: 25,
+      description: 'Coffee',
+      timestamp: Date.now()
+    });
+  };
+
+  return (
+    <div>
+      <button onClick={addExpense}>Add Expense</button>
+      <ul>
+        {expenses.map((exp) => (
+          <li key={exp._id}>{exp.description}: ${exp.amount}</li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 ```
 
 ## TypeScript Types
 
 ```typescript
-interface TableEvent {
+interface Doc {
+  _id: string;
+  _table: string;
+  [key: string]: any;
+}
+
+interface ConflictInfo {
+  docId: string;
   table: string;
-  docs: Doc[];
+  id: string;
+  currentRev: string;
+  conflictRevs: string[];
+  winner: Doc;
+  losers: Doc[];
+}
+
+interface SyncInfo {
+  direction: 'push' | 'pull' | 'both';
+  change: {
+    docs_read?: number;
+    docs_written?: number;
+    doc_write_failures?: number;
+    errors?: any[];
+  };
 }
 
 interface DecryptionErrorEvent {
   docId: string;
   error: Error;
-  doc: any; // The raw encrypted document from Fireproof
+  rawDoc: any;
 }
 
-interface StoreListener {
-  docsAdded: (events: TableEvent[]) => void;
-  docsChanged: (events: TableEvent[]) => void;
-  docsDeleted: (events: TableEvent[]) => void;
-  decryptionError?: (events: DecryptionErrorEvent[]) => void;
-}
-
-interface Doc {
-  _id: string;
-  [key: string]: any;
+interface RemoteOptions {
+  url: string;
+  live?: boolean;
+  retry?: boolean;
 }
 ```
+
+## How It Works
+
+1. **Encryption**: Documents are encrypted with AES-256-GCM before storage
+2. **Storage**: Encrypted data stored in PouchDB (IndexedDB in browser, LevelDB in Node)
+3. **Change Detection**: PouchDB's changes feed notifies of all changes
+4. **Conflict Detection**: PouchDB's MVCC detects conflicts automatically
+5. **Sync**: Bi-directional sync with CouchDB using PouchDB replication
+6. **Events**: Callbacks notify your app of changes, conflicts, and sync progress
+
+## Security Notes
+
+- Encryption happens client-side before any data leaves the device
+- Remote servers only see encrypted blobs
+- Password is never transmitted or stored
+- Use a strong password (consider using a key derivation function like PBKDF2)
 
 ## License
 
 MIT
+
+## Why PouchDB?
+
+- **Mature**: 10+ years of production use
+- **Reliable**: Battle-tested conflict resolution
+- **Compatible**: Works with any CouchDB server
+- **Offline-first**: Built for unreliable networks
+- **Simple**: Easy to understand replication model
+- **Free**: No vendor lock-in, self-hostable
