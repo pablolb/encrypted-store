@@ -21,19 +21,10 @@ Client-side encrypted document storage with change detection using PouchDB and A
 ### For Browser (Vite/Webpack)
 
 ```bash
-npm install @mrbelloc/encrypted-store pouchdb-browser
+npm install @mrbelloc/encrypted-store pouchdb-browser@^8.0.1
 ```
 
-**Vite Configuration:** Add this to your `vite.config.ts`:
-
-```typescript
-export default defineConfig({
-  define: {
-    global: 'globalThis',
-  },
-  // ... rest of your config
-})
-```
+**Note:** Currently requires PouchDB v8. PouchDB v9 has compatibility issues with TypeScript types and some bundlers.
 
 ### For Node.js
 
@@ -451,10 +442,10 @@ interface RemoteOptions {
 ## Browser vs Node.js
 
 ### Browser (Vite/Webpack)
-- Use `pouchdb-browser` - includes IndexedDB adapter
+- Use `pouchdb-browser@^8.0.1` - includes IndexedDB adapter
 - Smaller bundle size
 - Works with Vite, Webpack, etc.
-- **Vite users**: Add `define: { global: 'globalThis' }` to your config (see installation section)
+- **Vite users**: Add `define: { global: 'globalThis' }` to vite.config.ts (PouchDB v8 requirement)
 
 ### Node.js
 - Use `pouchdb` - includes LevelDB adapter
