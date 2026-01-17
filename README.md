@@ -18,17 +18,27 @@ Client-side encrypted document storage with change detection using PouchDB and A
 
 ## Installation
 
+### For Browser (Vite/Webpack)
+
 ```bash
-npm install @mrbelloc/encrypted-store
+npm install @mrbelloc/encrypted-store pouchdb-browser
+```
+
+### For Node.js
+
+```bash
+npm install @mrbelloc/encrypted-store pouchdb
 ```
 
 ## Quick Start
 
+### Browser (Vite/React/Vue/Svelte)
+
 ```typescript
-import PouchDB from 'pouchdb';
+import PouchDB from 'pouchdb-browser';
 import { EncryptedStore } from '@mrbelloc/encrypted-store';
 
-// Create database and encrypted store
+// Create database and encrypted store (uses IndexedDB in browser)
 const db = new PouchDB('myapp');
 const store = new EncryptedStore(db, 'my-password', {
   onChange: (docs) => {
@@ -75,6 +85,22 @@ await store.connectRemote({
   live: true,
   retry: true
 });
+```
+
+### Node.js
+
+```typescript
+import PouchDB from 'pouchdb';
+import { EncryptedStore } from '@mrbelloc/encrypted-store';
+
+// Create database and encrypted store (uses LevelDB in Node)
+const db = new PouchDB('myapp');
+const store = new EncryptedStore(db, 'my-password', {
+  onChange: (docs) => console.log('Changed:', docs),
+  onDelete: (docs) => console.log('Deleted:', docs),
+});
+
+await store.loadAll();
 ```
 
 ## API Reference
@@ -282,7 +308,7 @@ aws s3 cp backup-$TODAY.json s3://my-backups/couchdb/
 
 ```typescript
 import { useState, useEffect } from 'react';
-import PouchDB from 'pouchdb';
+import PouchDB from 'pouchdb-browser';
 import { EncryptedStore } from '@mrbelloc/encrypted-store';
 
 function useEncryptedStore(dbName: string, password: string) {
@@ -410,6 +436,17 @@ interface RemoteOptions {
 4. **Conflict Detection**: PouchDB's MVCC detects conflicts automatically
 5. **Sync**: Bi-directional sync with CouchDB using PouchDB replication
 6. **Events**: Callbacks notify your app of changes, conflicts, and sync progress
+
+## Browser vs Node.js
+
+### Browser (Vite/Webpack)
+- Use `pouchdb-browser` - includes IndexedDB adapter
+- Smaller bundle size
+- Works with Vite, Webpack, etc.
+
+### Node.js
+- Use `pouchdb` - includes LevelDB adapter
+- For CLI tools, servers, etc.
 
 ## Security Notes
 

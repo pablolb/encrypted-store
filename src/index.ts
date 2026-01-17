@@ -17,8 +17,9 @@ export type {
 export { EncryptionHelper, DecryptionError } from "./encryption.js";
 export type { CryptoInterface } from "./encryption.js";
 
-export const VERSION = "1.1.0";
+export const VERSION = "1.2.0";
 
 // Re-export PouchDB for convenience
-import PouchDB from "pouchdb";
+// Use pouchdb-browser for Vite/browser compatibility
+import PouchDB from "pouchdb-browser";
 export { PouchDB };

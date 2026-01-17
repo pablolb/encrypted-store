@@ -12,6 +12,9 @@ import {
 } from "@jest/globals";
 import PouchDB from "pouchdb";
 import MemoryAdapter from "pouchdb-adapter-memory";
+
+// Note: Tests use 'pouchdb' with memory adapter (Node.js environment)
+// Your app should use 'pouchdb-browser' in the browser
 import { EncryptedStore } from "../encryptedStore.js";
 import type {
   Doc,
