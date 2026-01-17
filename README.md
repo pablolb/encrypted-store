@@ -37,7 +37,9 @@ npm install @mrbelloc/encrypted-store pouchdb
 ### Browser (Vite/React/Vue/Svelte)
 
 ```typescript
-import PouchDB from 'pouchdb-browser';
+import PouchDBModule from 'pouchdb-browser';
+// Workaround for ESM/CommonJS compatibility in some bundlers
+const PouchDB = PouchDBModule.default || PouchDBModule;
 import { EncryptedStore } from '@mrbelloc/encrypted-store';
 
 // Create database and encrypted store (uses IndexedDB in browser)
@@ -310,7 +312,8 @@ aws s3 cp backup-$TODAY.json s3://my-backups/couchdb/
 
 ```typescript
 import { useState, useEffect } from 'react';
-import PouchDB from 'pouchdb-browser';
+import PouchDBModule from 'pouchdb-browser';
+const PouchDB = PouchDBModule.default || PouchDBModule;
 import { EncryptedStore } from '@mrbelloc/encrypted-store';
 
 function useEncryptedStore(dbName: string, password: string) {
@@ -446,6 +449,7 @@ interface RemoteOptions {
 - Smaller bundle size
 - Works with Vite, Webpack, etc.
 - **Vite users**: Add `define: { global: 'globalThis' }` to vite.config.ts (PouchDB v8 requirement)
+- **Import**: Use `const PouchDB = PouchDBModule.default || PouchDBModule` for better compatibility
 
 ### Node.js
 - Use `pouchdb` - includes LevelDB adapter

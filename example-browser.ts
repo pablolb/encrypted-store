@@ -5,7 +5,9 @@
  * npm install @mrbelloc/encrypted-store pouchdb-browser
  */
 
-import PouchDB from "pouchdb-browser";
+import PouchDBModule from "pouchdb-browser";
+// Workaround for ESM/CommonJS compatibility in some bundlers
+const PouchDB = PouchDBModule.default || PouchDBModule;
 import { EncryptedStore } from "@mrbelloc/encrypted-store";
 
 // Create a PouchDB database (uses IndexedDB in browser)
@@ -42,7 +44,7 @@ const store = new EncryptedStore(db, "my-secure-password", {
       // Option 1: Auto-resolve by picking latest
       const allVersions = [conflict.winner, ...conflict.losers];
       const latest = allVersions.sort(
-        (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
+        (a, b) => (b.timestamp || 0) - (a.timestamp || 0),
       )[0];
 
       store.resolveConflict(conflict.table, conflict.id, latest);
@@ -146,4 +148,11 @@ function removeFromUI(table: string, id: string) {
 init().catch(console.error);
 
 // Export functions for use in your app
-export { store, addExpense, getExpense, getAllExpenses, updateExpense, deleteExpense };
+export {
+  store,
+  addExpense,
+  getExpense,
+  getAllExpenses,
+  updateExpense,
+  deleteExpense,
+};
