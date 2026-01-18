@@ -447,6 +447,14 @@ export class EncryptedStore {
       });
 
       sync
+        .on("change", (info) => {
+          if (this.listener.onSync) {
+            this.listener.onSync({
+              direction: info.direction as "push" | "pull",
+              change: info.change,
+            });
+          }
+        })
         .on("complete", () => {
           resolve();
         })

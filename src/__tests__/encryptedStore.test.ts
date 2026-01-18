@@ -445,11 +445,13 @@ describe("EncryptedStore", () => {
       const remoteDb = new PouchDB("remote-test-db-2", {
         adapter: "memory",
       });
+      const onSync = jest.fn();
 
       try {
         store = new EncryptedStore(db, "test-password", {
           onChange: jest.fn(),
           onDelete: jest.fn(),
+          onSync,
         });
         await store.loadAll();
 
@@ -472,6 +474,9 @@ describe("EncryptedStore", () => {
         expect(allDocs.rows.some((row) => row.id === "expenses_dinner")).toBe(
           true,
         );
+
+        // Verify onSync callback was triggered
+        expect(onSync).toHaveBeenCalled();
       } finally {
         store.disconnectRemote();
         await remoteDb.destroy();
