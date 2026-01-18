@@ -459,6 +459,7 @@ export class EncryptedStore {
           resolve();
         })
         .on("error", (err) => {
+          console.error("[EncryptedStore] syncNow error:", err);
           reject(err);
         });
     });
