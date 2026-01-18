@@ -52,7 +52,23 @@ export interface RemoteOptions {
   retry?: boolean;
 }
 
+/**
+ * Options for configuring the EncryptedStore
+ */
 export interface EncryptedStoreOptions {
+  /**
+   * Key derivation mode for the passphrase.
+   *
+   * - `"derive"` (default): Use PBKDF2 with 100k iterations for user passphrases.
+   *   Recommended for production use. Provides strong protection against brute-force
+   *   and dictionary attacks. First unlock will take ~50-100ms.
+   *
+   * - `"raw"`: Use SHA-256 only. For pre-derived keys or advanced users who handle
+   *   key derivation themselves. Allows full control over KDF algorithm, iterations,
+   *   and progress UI.
+   *
+   * @default "derive"
+   */
   passphraseMode?: "derive" | "raw";
 }
 
@@ -209,6 +225,101 @@ export class EncryptedStore {
     } catch (error) {
       console.warn(`[EncryptedStore] Could not delete ${fullId}:`, error);
     }
+  }
+
+  /**
+   * Delete all documents locally only.
+   * Automatically disconnects sync first to prevent deletions from propagating to remote.
+   * Use this when you want to clear local data only.
+   */
+  async deleteAllLocal(): Promise<void> {
+    // Disconnect sync to ensure deletions stay local
+    this.disconnectRemote();
+
+    const result = await this.db.allDocs({ include_docs: false });
+
+    const docsToDelete = result.rows
+      .filter((row) => !row.id.startsWith("_design/"))
+      .map((row) => ({
+        _id: row.id,
+        _rev: row.value.rev,
+        _deleted: true,
+      }));
+
+    if (docsToDelete.length > 0) {
+      await this.db.bulkDocs(docsToDelete);
+    }
+  }
+
+  /**
+   * Delete all documents locally AND propagate deletions to remote.
+   * Waits for sync to complete before returning.
+   * Throws an error if sync is not connected.
+   */
+  async deleteAllAndSync(): Promise<void> {
+    if (!this.syncHandler) {
+      throw new Error(
+        "Sync is not connected. Call connectRemote() first or use deleteAllLocal() instead.",
+      );
+    }
+
+    const result = await this.db.allDocs({ include_docs: false });
+
+    const docsToDelete = result.rows
+      .filter((row) => !row.id.startsWith("_design/"))
+      .map((row) => ({
+        _id: row.id,
+        _rev: row.value.rev,
+        _deleted: true,
+      }));
+
+    if (docsToDelete.length === 0) {
+      return; // Nothing to delete
+    }
+
+    // Delete all documents
+    await this.db.bulkDocs(docsToDelete);
+
+    // Wait for sync to propagate deletions
+    return new Promise<void>((resolve, reject) => {
+      let changeCount = 0;
+      let resolved = false;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          reject(new Error("Timeout waiting for deletions to sync to remote"));
+        }
+      }, 30000); // 30 second timeout
+
+      const changeHandler = (info: any) => {
+        if (info.direction === "push") {
+          changeCount += info.change.docs_written || 0;
+
+          // Wait until all deletions have been pushed
+          if (changeCount >= docsToDelete.length && !resolved) {
+            clearTimeout(timeout);
+            resolved = true;
+            this.syncHandler?.removeListener("change", changeHandler);
+            this.syncHandler?.removeListener("error", errorHandler);
+            resolve();
+          }
+        }
+      };
+
+      const errorHandler = (err: any) => {
+        if (!resolved) {
+          clearTimeout(timeout);
+          resolved = true;
+          this.syncHandler?.removeListener("change", changeHandler);
+          this.syncHandler?.removeListener("error", errorHandler);
+          reject(err);
+        }
+      };
+
+      this.syncHandler!.on("change", changeHandler);
+      this.syncHandler!.on("error", errorHandler);
+    });
   }
 
   /** Get all documents (optionally filtered by table) */
