@@ -111,13 +111,25 @@ await store.loadAll();
 
 ## API Reference
 
-### `new EncryptedStore(db, password, listener?)`
+### `new EncryptedStore(db, password, listener?, options?)`
 
 Creates an encrypted store.
 
 - `db`: PouchDB database instance
 - `password`: Encryption password (string)
 - `listener`: Optional object with callbacks
+- `options`: Optional configuration object
+
+**Options:**
+
+```typescript
+interface EncryptedStoreOptions {
+  passphraseMode?: "derive" | "raw";  // default: "derive"
+}
+```
+
+- **`passphraseMode: "derive"`** (default): Uses PBKDF2 with 100k iterations for user passphrases. Recommended for production use. Provides strong protection against brute-force and dictionary attacks. First unlock will take ~50-100ms.
+- **`passphraseMode: "raw"`**: Uses SHA-256 only. For pre-derived keys or advanced users who handle key derivation themselves. Allows full control over KDF algorithm, iterations, and progress UI.
 
 ### Listener Callbacks
 
@@ -158,6 +170,29 @@ Gets a document by table and ID. Returns `null` if not found.
 
 Deletes a document by table and ID.
 
+### `await store.deleteAllLocal()`
+
+Deletes all documents locally only. Automatically disconnects sync first to prevent deletions from propagating to remote. Use this when you want to clear local data only.
+
+```typescript
+// Clear all local data without affecting remote
+await store.deleteAllLocal();
+```
+
+### `await store.deleteAllAndSync()`
+
+Deletes all documents locally AND propagates deletions to remote. Waits for sync to complete before returning. Throws an error if sync is not connected.
+
+```typescript
+// Connect to remote first
+await store.connectRemote({ url: 'http://localhost:5984/mydb' });
+
+// Delete everything locally and remotely
+await store.deleteAllAndSync();
+```
+
+**Note:** Call `connectRemote()` first, or use `deleteAllLocal()` instead.
+
 ### `await store.getAll(table?)`
 
 Gets all documents, optionally filtered by table.
@@ -182,6 +217,39 @@ interface RemoteOptions {
 ### `store.disconnectRemote()`
 
 Disconnects from remote sync.
+
+### `await store.syncNow()`
+
+Triggers an immediate one-time sync with the remote. Useful for controlling sync timing, especially with rate-limited services like IBM Cloudant's free tier.
+
+```typescript
+// Connect with continuous sync disabled
+await store.connectRemote({
+  url: 'http://localhost:5984/mydb',
+  live: false,
+  retry: false
+});
+
+// Manually trigger sync when needed
+await store.syncNow();
+
+// Example: Batch multiple changes then sync
+await store.put('expenses', { _id: '1', amount: 10 });
+await store.put('expenses', { _id: '2', amount: 20 });
+await store.put('expenses', { _id: '3', amount: 30 });
+await store.syncNow(); // Sync all changes at once
+```
+
+Throws an error if `connectRemote()` hasn't been called first.
+
+### `store.reconnect()`
+
+Re-subscribes to changes. Useful after disconnect/reconnect scenarios or if the change feed needs to be restarted.
+
+```typescript
+// Restart the change detection feed
+store.reconnect();
+```
 
 ### `await store.getConflictInfo(table, id)`
 
@@ -280,9 +348,19 @@ const store = new EncryptedStore(db, password, {
 
 1. **IBM Cloudant** - Free tier: 1GB storage, 20 req/sec
    ```typescript
+   // Option 1: Continuous sync (may hit rate limits on initial sync)
    await store.connectRemote({
      url: 'https://username:password@username.cloudant.com/mydb'
    });
+
+   // Option 2: Manual sync control (recommended for rate-limited services)
+   await store.connectRemote({
+     url: 'https://username:password@username.cloudant.com/mydb',
+     live: false,
+     retry: false
+   });
+   // Trigger sync manually when needed
+   await store.syncNow();
    ```
 
 2. **Oracle Cloud Free Tier** - Run your own CouchDB
@@ -432,6 +510,10 @@ interface RemoteOptions {
   url: string;
   live?: boolean;
   retry?: boolean;
+}
+
+interface EncryptedStoreOptions {
+  passphraseMode?: "derive" | "raw";
 }
 ```
 

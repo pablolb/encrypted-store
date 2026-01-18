@@ -84,6 +84,7 @@ export class EncryptedStore {
   private listener: StoreListener;
   private changesHandler: PouchDB.Core.Changes<any> | null = null;
   private syncHandler: PouchDB.Replication.Sync<any> | null = null;
+  private remoteUrl: string | null = null;
   private processingChain: Promise<void> = Promise.resolve();
 
   constructor(
@@ -364,6 +365,8 @@ export class EncryptedStore {
   async connectRemote(options: RemoteOptions): Promise<void> {
     this.disconnectRemote();
 
+    this.remoteUrl = options.url;
+
     const syncOptions: PouchDB.Replication.SyncOptions = {
       live: options.live ?? true,
       retry: options.retry ?? true,
@@ -422,6 +425,35 @@ export class EncryptedStore {
       this.syncHandler.cancel();
       this.syncHandler = null;
     }
+    this.remoteUrl = null;
+  }
+
+  /**
+   * Trigger an immediate one-time sync with the remote.
+   * Requires that connectRemote() has been called first.
+   * Returns a promise that resolves when the sync completes.
+   */
+  async syncNow(): Promise<void> {
+    if (!this.remoteUrl) {
+      throw new Error(
+        "No remote connection configured. Call connectRemote() first.",
+      );
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const sync = this.db.sync(this.remoteUrl!, {
+        live: false,
+        retry: false,
+      });
+
+      sync
+        .on("complete", () => {
+          resolve();
+        })
+        .on("error", (err) => {
+          reject(err);
+        });
+    });
   }
 
   /** Resolve a conflict by choosing the winner */

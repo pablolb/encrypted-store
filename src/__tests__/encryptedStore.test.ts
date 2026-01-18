@@ -440,6 +440,55 @@ describe("EncryptedStore", () => {
         await remoteDb.destroy();
       }
     });
+
+    test("should manually sync with syncNow()", async () => {
+      const remoteDb = new PouchDB("remote-test-db-2", {
+        adapter: "memory",
+      });
+
+      try {
+        store = new EncryptedStore(db, "test-password", {
+          onChange: jest.fn(),
+          onDelete: jest.fn(),
+        });
+        await store.loadAll();
+
+        // Add a document first
+        await store.put("expenses", { _id: "dinner", amount: 25 });
+
+        // Connect to remote without live sync
+        await store.connectRemote({
+          url: remoteDb as any,
+          live: false,
+          retry: false,
+        });
+
+        // Manually trigger sync
+        await store.syncNow();
+
+        // Verify document was synced to remote
+        const allDocs = await remoteDb.allDocs({ include_docs: true });
+        expect(allDocs.rows.length).toBeGreaterThan(0);
+        expect(allDocs.rows.some((row) => row.id === "expenses_dinner")).toBe(
+          true,
+        );
+      } finally {
+        store.disconnectRemote();
+        await remoteDb.destroy();
+      }
+    }, 10000);
+
+    test("should throw error when syncNow() called without remote", async () => {
+      store = new EncryptedStore(db, "test-password", {
+        onChange: jest.fn(),
+        onDelete: jest.fn(),
+      });
+      await store.loadAll();
+
+      await expect(store.syncNow()).rejects.toThrow(
+        "No remote connection configured",
+      );
+    });
   });
 
   describe("Edge Cases", () => {
