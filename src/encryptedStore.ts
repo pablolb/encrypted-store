@@ -52,6 +52,10 @@ export interface RemoteOptions {
   retry?: boolean;
 }
 
+export interface EncryptedStoreOptions {
+  passphraseMode?: "derive" | "raw";
+}
+
 interface EncryptedDoc {
   _id: string;
   _rev?: string;
@@ -70,9 +74,14 @@ export class EncryptedStore {
     db: PouchDB.Database,
     password: string,
     listener?: StoreListener,
+    options?: EncryptedStoreOptions,
   ) {
     this.db = db;
-    this.encryptionHelper = new EncryptionHelper(password);
+    this.encryptionHelper = new EncryptionHelper(
+      password,
+      undefined,
+      options?.passphraseMode || "derive",
+    );
     this.listener = listener || { onChange: () => {}, onDelete: () => {} };
   }
 

@@ -22,6 +22,11 @@ interface CryptoInterface {
       key: CryptoKey,
       data: BufferSource,
     ): Promise<ArrayBuffer>;
+    deriveBits(
+      algorithm: object,
+      baseKey: CryptoKey,
+      length: number,
+    ): Promise<ArrayBuffer>;
   };
   getRandomValues<T extends ArrayBufferView>(array: T): T;
 }
@@ -38,12 +43,18 @@ class EncryptionHelper {
   private keyPromise: Promise<CryptoKey> | null = null;
   private readonly passphrase: string;
   private readonly crypto: CryptoInterface;
+  private readonly passphraseMode: "derive" | "raw";
 
-  constructor(passphrase: string, crypto?: CryptoInterface) {
+  constructor(
+    passphrase: string,
+    crypto?: CryptoInterface,
+    passphraseMode: "derive" | "raw" = "derive",
+  ) {
     this.passphrase = passphrase;
     this.crypto =
       crypto ||
       (typeof window !== "undefined" ? window.crypto : (global as any).crypto);
+    this.passphraseMode = passphraseMode;
   }
 
   private async getKey(): Promise<CryptoKey> {
@@ -51,16 +62,54 @@ class EncryptionHelper {
       return this.keyPromise;
     }
 
-    const enc = new TextEncoder();
-    const pwUtf8 = enc.encode(this.passphrase);
-    const pwHash = await this.crypto.subtle.digest("SHA-256", pwUtf8);
-    this.keyPromise = this.crypto.subtle.importKey(
-      "raw",
-      pwHash,
-      "AES-GCM",
-      true,
-      ["encrypt", "decrypt"],
-    );
+    this.keyPromise = (async () => {
+      const enc = new TextEncoder();
+      const pwUtf8 = enc.encode(this.passphrase);
+
+      let keyMaterial: ArrayBuffer;
+
+      if (this.passphraseMode === "derive") {
+        // User passphrase - use PBKDF2 to derive strong key
+        // No salt for deterministic behavior (same passphrase = same key everywhere)
+        // Use passphrase itself as "salt" for PBKDF2
+        const iterations = 100000; // 100k iterations - good security/performance balance
+
+        // Import passphrase as key material for PBKDF2
+        const baseKey = await this.crypto.subtle.importKey(
+          "raw",
+          pwUtf8,
+          "PBKDF2",
+          false,
+          ["deriveBits"],
+        );
+
+        // Derive 256 bits using PBKDF2
+        keyMaterial = await this.crypto.subtle.deriveBits(
+          {
+            name: "PBKDF2",
+            salt: pwUtf8, // Use passphrase as salt for determinism
+            iterations: iterations,
+            hash: "SHA-256",
+          },
+          baseKey,
+          256, // bits
+        );
+      } else {
+        // Raw mode - passphrase is already strong (e.g., random bytes)
+        // Just hash to normalize to 256 bits
+        keyMaterial = await this.crypto.subtle.digest("SHA-256", pwUtf8);
+      }
+
+      // Import the derived/hashed material as AES-GCM key
+      return await this.crypto.subtle.importKey(
+        "raw",
+        keyMaterial,
+        "AES-GCM",
+        true,
+        ["encrypt", "decrypt"],
+      );
+    })();
+
     return this.keyPromise;
   }
 
