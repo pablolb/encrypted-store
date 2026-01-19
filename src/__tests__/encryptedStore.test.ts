@@ -494,6 +494,42 @@ describe("EncryptedStore", () => {
         "No remote connection configured",
       );
     });
+
+    test("should trigger onSync callback even when no changes occur", async () => {
+      const remoteDb = new PouchDB("remote-test-db-3", {
+        adapter: "memory",
+      });
+      const onSync = jest.fn();
+
+      try {
+        store = new EncryptedStore(db, "test-password", {
+          onChange: jest.fn(),
+          onDelete: jest.fn(),
+          onSync,
+        });
+        await store.loadAll();
+
+        // Connect to remote
+        await store.connectRemote({
+          url: remoteDb as any,
+          live: false,
+          retry: false,
+        });
+
+        // Sync once to ensure databases are in sync
+        await store.syncNow();
+        onSync.mockClear();
+
+        // Sync again with no changes
+        await store.syncNow();
+
+        // Verify onSync callback was still triggered
+        expect(onSync).toHaveBeenCalled();
+      } finally {
+        store.disconnectRemote();
+        await remoteDb.destroy();
+      }
+    }, 10000);
   });
 
   describe("Edge Cases", () => {

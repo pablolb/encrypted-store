@@ -446,8 +446,11 @@ export class EncryptedStore {
         retry: false,
       });
 
+      let changeEventFired = false;
+
       sync
         .on("change", (info) => {
+          changeEventFired = true;
           if (this.listener.onSync) {
             this.listener.onSync({
               direction: info.direction as "push" | "pull",
@@ -455,7 +458,33 @@ export class EncryptedStore {
             });
           }
         })
-        .on("complete", () => {
+        .on("complete", (info) => {
+          // If no change events fired, still notify with the complete info
+          if (!changeEventFired && this.listener.onSync) {
+            // Fire onSync for both push and pull if they occurred
+            if (info.push && info.push.docs_written !== undefined) {
+              this.listener.onSync({
+                direction: "push",
+                change: {
+                  docs_read: info.push.docs_read,
+                  docs_written: info.push.docs_written,
+                  doc_write_failures: info.push.doc_write_failures,
+                  errors: info.push.errors,
+                },
+              });
+            }
+            if (info.pull && info.pull.docs_written !== undefined) {
+              this.listener.onSync({
+                direction: "pull",
+                change: {
+                  docs_read: info.pull.docs_read,
+                  docs_written: info.pull.docs_written,
+                  doc_write_failures: info.pull.doc_write_failures,
+                  errors: info.pull.errors,
+                },
+              });
+            }
+          }
           resolve();
         })
         .on("error", (err) => {
