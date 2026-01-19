@@ -446,21 +446,9 @@ export class EncryptedStore {
         retry: false,
       });
 
-      let changeEventFired = false;
-
       sync
-        .on("change", (info) => {
-          changeEventFired = true;
-          if (this.listener.onSync) {
-            this.listener.onSync({
-              direction: info.direction as "push" | "pull",
-              change: info.change,
-            });
-          }
-        })
         .on("complete", (info) => {
-          // If no change events fired, still notify with the complete info
-          if (!changeEventFired && this.listener.onSync) {
+          if (this.listener.onSync) {
             // Fire onSync for both push and pull if they occurred
             if (info.push && info.push.docs_written !== undefined) {
               this.listener.onSync({
